@@ -3,6 +3,26 @@ name: build
 on:
   workflow_dispatch:
     inputs:
+      kernel_version:
+        description: 'Kernel version (e.g. 4.4.60, 5.4.171). Leave empty for default matrix.'
+        required: false
+        default: ''
+        type: string
+      arch:
+        description: 'Architecture (arm64, armv7, mips). Leave empty for all architectures.'
+        required: false
+        default: ''
+        type: choice
+        options:
+        - ''
+        - arm64
+        - armv7
+        - mips
+      preempt:
+        description: 'Preempt enabled'
+        required: false
+        default: false
+        type: boolean
       test_build:
         description: 'Test build (only arm64 5.4)'
         required: true
@@ -29,6 +49,9 @@ env:
   TEST_BUILD: ${{ github.event.inputs.test_build == 'true' }}
   FAKE_BUILD: ${{ github.event.inputs.fake_build == 'true' }}
   TAG_SUFFIX: ${{ github.event.inputs.suffix }}
+  CUSTOM_KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
+  CUSTOM_ARCH: ${{ github.event.inputs.arch }}
+  CUSTOM_PREEMPT: ${{ github.event.inputs.preempt == 'true' }}
   REPO_URL: https://github.com/openwrt-xiaomi/kmod-xmir-patcher
   REPO_LNK: openwrt-xiaomi/kmod-xmir-patcher
   REPO_BRANCH: master
@@ -54,6 +77,9 @@ jobs:
       fw_date: ${{ steps.gh.outputs.fw_date }}
       test_build: ${{ env.TEST_BUILD }}
       fake_build: ${{ env.FAKE_BUILD }}
+      custom_kernel_version: ${{ env.CUSTOM_KERNEL_VERSION }}
+      custom_arch: ${{ env.CUSTOM_ARCH }}
+      custom_preempt: ${{ env.CUSTOM_PREEMPT }}
     steps:
       - name: Get repo data via GH API
         id: gh
@@ -82,36 +108,40 @@ jobs:
             echo "build_time=$BUILD_TIME"
             echo "fw_date=$FW_DATE"
           } >> $GITHUB_OUTPUT
+
+  generate-matrix:
+    needs: check
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        env:
+          CUSTOM_KERNEL_VERSION: ${{ needs.check.outputs.custom_kernel_version }}
+          CUSTOM_ARCH: ${{ needs.check.outputs.custom_arch }}
+          CUSTOM_PREEMPT: ${{ needs.check.outputs.custom_preempt }}
+        run: |
+          if [ -n "$CUSTOM_KERNEL_VERSION" ] || [ -n "$CUSTOM_ARCH" ]; then
+            # Custom build - single configuration
+            ARCH="${CUSTOM_ARCH:-armv7}"
+            KVER="${CUSTOM_KERNEL_VERSION:-4.4.60}"
+            PREEMPT="p_off"
+            [ "$CUSTOM_PREEMPT" = "true" ] && PREEMPT="p_on"
+            echo "matrix={\"include\":[{\"arch\":\"$ARCH\",\"kver\":\"$KVER\",\"preempt\":\"$PREEMPT\"}]}" >> $GITHUB_OUTPUT
+          else
+            # Default matrix build
+            cat >> $GITHUB_OUTPUT << 'EOF'
+          matrix={"arch":["arm64","armv7","mips"],"kver":["4.4","5.4","6.6"],"preempt":["p_off","p_on"],"exclude":[{"arch":"armv7","kver":"6.6"},{"arch":"mips","kver":"6.6"}],"include":[{"arch":"arm64","kver":"5.4","preempt":"p_on"}]}
+          EOF
+          fi
   
   build:
-    needs: check
+    needs: [check, generate-matrix]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
-      matrix:
-        arch:
-          - arm64
-          - armv7
-          - mips
-        kver:
-          - 4.4
-          - 5.4
-          - 6.6
-        preempt:
-          - p_off
-          - p_on
-        isTestOrFake:
-          - ${{ needs.check.outputs.test_build == 'true' || needs.check.outputs.fake_build == 'true' }}
-        exclude:
-          - arch: armv7
-            kver: 6.6
-          - arch: mips
-            kver: 6.6
-          - { isTestOrFake: true }
-        include:
-          - arch: arm64
-            kver: 5.4
-            preempt: p_on
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
 
     container:
       image: ghcr.io/openwrt/sdk:${{ matrix.arch == 'arm64' && 'aarch64_generic' || matrix.arch == 'armv7' && 'arm_cortex-a7' || matrix.arch == 'mips' && 'mipsel_24kc' }}-24.10.4
@@ -182,7 +212,15 @@ jobs:
 
       - name: Download Linux Kernel sources
         run: |
-          git clone https://github.com/torvalds/linux.git --depth 1 -b v$KVER $KDIR
+          # Check if KVER contains patch version (e.g., 4.4.60)
+          PATCH_VERSION=$(echo "$KVER" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          if [ -n "$PATCH_VERSION" ]; then
+            # Use stable kernel repo for exact version
+            git clone https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git --depth 1 -b v$KVER $KDIR
+          else
+            # Use mainline kernel repo for base version
+            git clone https://github.com/torvalds/linux.git --depth 1 -b v$KVER $KDIR
+          fi
 
       - name: Patch Linux Kernel sources
         id: patch
@@ -217,7 +255,13 @@ jobs:
           [ $ARCH_TAG = armv7 ] && ARCH="arm"
           [ $ARCH_TAG = arm64 ] && ARCH="arm64"
           [ $ARCH_TAG = mips  ] && ARCH="mips"
+          # Try exact version config first, fallback to major version
           KCFG=$WORK_DIR/kernel-$KVER-$ARCH_TAG.config
+          if [ ! -f "$KCFG" ]; then
+            KVER_MAJOR=$(echo "$KVER" | cut -d. -f1,2)
+            KCFG=$WORK_DIR/kernel-$KVER_MAJOR-$ARCH_TAG.config
+            echo "Fallback to major version config: $KCFG"
+          fi
           echo "KCFG = $KCFG"
           echo "" >> $KCFG
           echo "CONFIG_XMIR_PATCHER=m" >> $KCFG
@@ -264,8 +308,8 @@ jobs:
           echo "############ prepare defconfig ############"
           make xq_defconfig
           echo "############ patch .config ############"
-          sed -i 's/^CONFIG_LOCALVERSION=".*/CONFIG_LOCALVERSION="-XMiR-Patcher"/g' .config
-          sed -i 's/^# CONFIG_LOCALVERSION.*/CONFIG_LOCALVERSION="-XMiR-Patcher"/g' .config
+          sed -i 's/^CONFIG_LOCALVERSION=".*/CONFIG_LOCALVERSION=""/g' .config
+          sed -i 's/^# CONFIG_LOCALVERSION.*/CONFIG_LOCALVERSION=""/g' .config
           scripts/config --disable CONFIG_LOCALVERSION_AUTO
           scripts/config --disable DEBUG_INFO
           scripts/config --undefine GDB_SCRIPTS

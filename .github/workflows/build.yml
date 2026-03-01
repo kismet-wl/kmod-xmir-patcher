@@ -400,7 +400,7 @@ jobs:
         with:
           pattern: kmod-*
 
-      - name: Put images into zip
+      - name: Put modules into archives
         env:
           TAG: ${{ needs.check.outputs.tag }}
         run: |
@@ -418,8 +418,10 @@ jobs:
                   fi
                   cp $XDIR/xmir_patcher.ko ./public/xmir_patcher-$KVER-$ARCH$SUFFIX.ko
               fi
-          done          
-          find ./public -type f -name 'xmir*' -exec sh -c 'zip -0 ./public/kmod-xmir-$TAG.zip -j {} {}/*' \;
+          done
+          cd public
+          tar -czvf ../kmod-xmir-$TAG.tar.gz *.ko
+          zip -0 ../kmod-xmir-$TAG.zip *.ko
 
       - name: Upload assets
         uses: andelf/nightly-release@main
@@ -433,4 +435,6 @@ jobs:
           body: |
             kmod for XMiR-Patcher ${{ needs.check.outputs.build_date }}-${{ needs.check.outputs.build_time }}
             author: [remittor](https://github.com/remittor)
-          files: ./public/*.zip 
+          files: |
+            ./*.tar.gz
+            ./*.zip 

@@ -1,5 +1,5 @@
 diff --git a/src/mod/common/db/bib/db.c b/src/mod/common/db/bib/db.c
-index e24dfa6..7ad90d8 100644
+index e24dfa6c..7ad90d8e 100644
 --- a/src/mod/common/db/bib/db.c
 +++ b/src/mod/common/db/bib/db.c
 @@ -476,7 +476,7 @@ static void log_bib(struct xlator *jool, struct tabled_bib *bib, char *action)
@@ -20,8 +20,30 @@ index e24dfa6..7ad90d8 100644
  	log_info("%s %ld/%d/%d %d:%d:%d (GMT) - %s " TA6PP "|" TA6PP "|"
  			TA4PP "|" TA4PP "|%s", jool->iname,
  			1900 + time.tm_year, time.tm_mon + 1, time.tm_mday,
+diff --git a/src/mod/common/init.c b/src/mod/common/init.c
+index f3e144b7..e847d65b 100644
+--- a/src/mod/common/init.c
++++ b/src/mod/common/init.c
+@@ -146,7 +146,7 @@ bool is_nat64_enabled(void)
+ 	return !!refs;
+ }
+ 
+-static int __init jool_init(void)
++static int __init __cold jool_init(void)
+ {
+ 	int error;
+ 
+@@ -160,7 +160,7 @@ static int __init jool_init(void)
+ 	return 0;
+ }
+ 
+-static void __exit jool_exit(void)
++static void __exit __cold jool_exit(void)
+ {
+ 	teardown_common_modules();
+ 
 diff --git a/src/mod/common/kernel_hook.h b/src/mod/common/kernel_hook.h
-index e268913..59ac70f 100644
+index e2689130..59ac70f1 100644
 --- a/src/mod/common/kernel_hook.h
 +++ b/src/mod/common/kernel_hook.h
 @@ -4,6 +4,7 @@
@@ -33,7 +55,7 @@ index e268913..59ac70f 100644
  #ifndef XTABLES_DISABLED
  #include <linux/netfilter/x_tables.h>
 diff --git a/src/mod/common/kernel_hook_iptables.c b/src/mod/common/kernel_hook_iptables.c
-index ba9d82d..50d4397 100644
+index ba9d82d8..50d4397f 100644
 --- a/src/mod/common/kernel_hook_iptables.c
 +++ b/src/mod/common/kernel_hook_iptables.c
 @@ -63,7 +63,7 @@ EXPORT_SYMBOL_GPL(target_checkentry);
@@ -46,7 +68,7 @@ index ba9d82d..50d4397 100644
  
  static unsigned int verdict2iptables(verdict result, bool enable_debug)
 diff --git a/src/mod/common/nl/attribute.c b/src/mod/common/nl/attribute.c
-index a7dd1d0..6fa0600 100644
+index a7dd1d02..6fa06003 100644
 --- a/src/mod/common/nl/attribute.c
 +++ b/src/mod/common/nl/attribute.c
 @@ -517,7 +517,7 @@ int jnla_get_plateaus(struct nlattr *root, struct mtu_plateaus *out)
@@ -75,7 +97,7 @@ index a7dd1d0..6fa0600 100644
  }
  
 diff --git a/src/mod/common/nl/stats.c b/src/mod/common/nl/stats.c
-index 63fe782..b66d1b2 100644
+index 63fe7824..b66d1b26 100644
 --- a/src/mod/common/nl/stats.c
 +++ b/src/mod/common/nl/stats.c
 @@ -41,7 +41,7 @@ int handle_stats_foreach(struct sk_buff *skb, struct genl_info *info)
@@ -88,7 +110,7 @@ index 63fe782..b66d1b2 100644
  			if (!written)
  				goto revert_response;
 diff --git a/src/mod/common/rfc7915/6to4.c b/src/mod/common/rfc7915/6to4.c
-index fb18db6..6a57351 100644
+index fb18db6a..6a57351c 100644
 --- a/src/mod/common/rfc7915/6to4.c
 +++ b/src/mod/common/rfc7915/6to4.c
 @@ -1,6 +1,7 @@
@@ -100,7 +122,7 @@ index fb18db6..6a57351 100644
  #include <net/udp.h>
  #include <net/tcp.h>
 diff --git a/src/mod/common/rfc7915/common.c b/src/mod/common/rfc7915/common.c
-index c32fca3..0e1a688 100644
+index c32fca32..0e1a6885 100644
 --- a/src/mod/common/rfc7915/common.c
 +++ b/src/mod/common/rfc7915/common.c
 @@ -417,6 +417,6 @@ void skb_cleanup_copy(struct sk_buff *skb)
@@ -112,10 +134,10 @@ index c32fca3..0e1a688 100644
  #endif
  }
 diff --git a/src/mod/nat64/jool.c b/src/mod/nat64/jool.c
-index 4f7e6d1..78894dd 100644
+index 4f7e6d12..528dd8c2 100644
 --- a/src/mod/nat64/jool.c
 +++ b/src/mod/nat64/jool.c
-@@ -76,8 +76,8 @@ static struct pernet_operations joolns_ops = {
+@@ -76,11 +76,11 @@ static struct pernet_operations joolns_ops = {
  
  static void defrag_enable(struct net *ns)
  {
@@ -125,4 +147,39 @@ index 4f7e6d1..78894dd 100644
 +	nf_defrag_ipv6_enable();
  }
  
- static int __init nat64_init(void)
+-static int __init nat64_init(void)
++static int __init __cold nat64_init(void)
+ {
+ 	int error;
+ 
+@@ -117,7 +117,7 @@ static int __init nat64_init(void)
+ 	return error;
+ }
+ 
+-static void __exit nat64_exit(void)
++static void __exit __cold nat64_exit(void)
+ {
+ 	jool_nat64_put();
+ #ifndef XTABLES_DISABLED
+diff --git a/src/mod/siit/jool_siit.c b/src/mod/siit/jool_siit.c
+index d5a51b6a..e2e1be77 100644
+--- a/src/mod/siit/jool_siit.c
++++ b/src/mod/siit/jool_siit.c
+@@ -53,7 +53,7 @@ static struct pernet_operations joolns_ops = {
+ 	.exit_batch = flush_batch,
+ };
+ 
+-static int __init siit_init(void)
++static int __init __cold siit_init(void)
+ {
+ 	int error;
+ 
+@@ -89,7 +89,7 @@ static int __init siit_init(void)
+ 	return 0;
+ }
+ 
+-static void __exit siit_exit(void)
++static void __exit __cold siit_exit(void)
+ {
+ 	jool_siit_put();
+ #ifndef XTABLES_DISABLED

@@ -1,0 +1,128 @@
+diff --git a/src/mod/common/db/bib/db.c b/src/mod/common/db/bib/db.c
+index e24dfa6..7ad90d8 100644
+--- a/src/mod/common/db/bib/db.c
++++ b/src/mod/common/db/bib/db.c
+@@ -476,7 +476,7 @@ static void log_bib(struct xlator *jool, struct tabled_bib *bib, char *action)
+ 		return;
+ 
+ 	tsec = ktime_get_real_seconds();
+-	time64_to_tm(tsec, 0, &time);
++	time_to_tm(tsec, 0, &time);
+ 	log_info("%s %ld/%d/%d %d:%d:%d (GMT) - %s " TA6PP " to " TA4PP " (%s)",
+ 			jool->iname,
+ 			1900 + time.tm_year, time.tm_mon + 1, time.tm_mday,
+@@ -501,7 +501,7 @@ static void log_session(struct xlator *jool,
+ 		return;
+ 
+ 	tsec = ktime_get_real_seconds();
+-	time64_to_tm(tsec, 0, &time);
++	time_to_tm(tsec, 0, &time);
+ 	log_info("%s %ld/%d/%d %d:%d:%d (GMT) - %s " TA6PP "|" TA6PP "|"
+ 			TA4PP "|" TA4PP "|%s", jool->iname,
+ 			1900 + time.tm_year, time.tm_mon + 1, time.tm_mday,
+diff --git a/src/mod/common/kernel_hook.h b/src/mod/common/kernel_hook.h
+index e268913..59ac70f 100644
+--- a/src/mod/common/kernel_hook.h
++++ b/src/mod/common/kernel_hook.h
+@@ -4,6 +4,7 @@
+ #include <linux/netfilter_ipv4.h>
+ #include <linux/netfilter_ipv6.h>
+ #include "common/config.h"
++#include <linux/netfilter.h>
+ 
+ #ifndef XTABLES_DISABLED
+ #include <linux/netfilter/x_tables.h>
+diff --git a/src/mod/common/kernel_hook_iptables.c b/src/mod/common/kernel_hook_iptables.c
+index ba9d82d..50d4397 100644
+--- a/src/mod/common/kernel_hook_iptables.c
++++ b/src/mod/common/kernel_hook_iptables.c
+@@ -63,7 +63,7 @@ EXPORT_SYMBOL_GPL(target_checkentry);
+ 
+ static struct net *action_param_net(const struct xt_action_param *param)
+ {
+-	return param->state->net;
++	return param->net;
+ }
+ 
+ static unsigned int verdict2iptables(verdict result, bool enable_debug)
+diff --git a/src/mod/common/nl/attribute.c b/src/mod/common/nl/attribute.c
+index a7dd1d0..6fa0600 100644
+--- a/src/mod/common/nl/attribute.c
++++ b/src/mod/common/nl/attribute.c
+@@ -517,7 +517,7 @@ int jnla_get_plateaus(struct nlattr *root, struct mtu_plateaus *out)
+ 	if (error)
+ 		return error;
+ 	error = nla_validate(nla_data(root), nla_len(root), JNLAL_MAX,
+-			joolnl_plateau_list_policy, NULL);
++			joolnl_plateau_list_policy);
+ 	if (error)
+ 		return error;
+ 
+@@ -853,13 +853,9 @@ int jnla_parse_nested(struct nlattr *tb[], int maxtype,
+ 		const struct nlattr *nla, const struct nla_policy *policy,
+ 		char const *name)
+ {
+-	int error;
+-	struct netlink_ext_ack extack;
+-
+-	error = nla_parse_nested(tb, maxtype, nla, policy, &extack);
++	int error = nla_parse_nested(tb, maxtype, nla, policy);
+ 	if (error)
+-		log_err("The '%s' attribute is malformed: %s", name, extack._msg);
+-
++		log_err("The '%s' attribute is malformed.", name);
+ 	return error;
+ }
+ 
+diff --git a/src/mod/common/nl/stats.c b/src/mod/common/nl/stats.c
+index 63fe782..b66d1b2 100644
+--- a/src/mod/common/nl/stats.c
++++ b/src/mod/common/nl/stats.c
+@@ -41,7 +41,7 @@ int handle_stats_foreach(struct sk_buff *skb, struct genl_info *info)
+ 
+ 	written = 0;
+ 	for (id++; id <= JSTAT_UNKNOWN; id++) {
+-		error = nla_put_u64_64bit(response.skb, id, stats[id], JSTAT_PADDING);
++		error = nla_put_u64(response.skb, id, stats[id]);
+ 		if (error) {
+ 			if (!written)
+ 				goto revert_response;
+diff --git a/src/mod/common/rfc7915/6to4.c b/src/mod/common/rfc7915/6to4.c
+index fb18db6..6a57351 100644
+--- a/src/mod/common/rfc7915/6to4.c
++++ b/src/mod/common/rfc7915/6to4.c
+@@ -1,6 +1,7 @@
+ #include "mod/common/rfc7915/6to4.h"
+ 
+ #include <linux/inetdevice.h>
++#include <net/ip.h>
+ #include <net/ip6_checksum.h>
+ #include <net/udp.h>
+ #include <net/tcp.h>
+diff --git a/src/mod/common/rfc7915/common.c b/src/mod/common/rfc7915/common.c
+index c32fca3..0e1a688 100644
+--- a/src/mod/common/rfc7915/common.c
++++ b/src/mod/common/rfc7915/common.c
+@@ -417,6 +417,6 @@ void skb_cleanup_copy(struct sk_buff *skb)
+ #if LINUX_VERSION_AT_LEAST(5, 18, 0, 9999, 9)
+ 	skb_clear_tstamp(skb);
+ #else
+-	skb->tstamp = 0;
++	skb->tstamp = ktime_set(0, 0);
+ #endif
+ }
+diff --git a/src/mod/nat64/jool.c b/src/mod/nat64/jool.c
+index 4f7e6d1..78894dd 100644
+--- a/src/mod/nat64/jool.c
++++ b/src/mod/nat64/jool.c
+@@ -76,8 +76,8 @@ static struct pernet_operations joolns_ops = {
+ 
+ static void defrag_enable(struct net *ns)
+ {
+-	nf_defrag_ipv4_enable(ns);
+-	nf_defrag_ipv6_enable(ns);
++	nf_defrag_ipv4_enable();
++	nf_defrag_ipv6_enable();
+ }
+ 
+ static int __init nat64_init(void)

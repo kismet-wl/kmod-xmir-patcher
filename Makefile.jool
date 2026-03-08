@@ -1,0 +1,71 @@
+# Makefile for Jool kernel modules
+# 编译 Jool NAT64/SIIT 内核模块
+
+JOOL_SRC ?= ./jool-src
+KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
+ARCH ?= arm64
+CROSS_COMPILE ?=
+OUT_DIR ?= ./kmods
+
+# Jool 模块路径
+JOOL_MOD_COMMON = $(JOOL_SRC)/src/mod/common
+JOOL_MOD_NAT64 = $(JOOL_SRC)/src/mod/nat64
+JOOL_MOD_SIIT = $(JOOL_SRC)/src/mod/siit
+
+.PHONY: all clean jool_common jool_nat64 jool_siit install strip
+
+all: jool_common jool_nat64 jool_siit
+	@echo "Jool modules built successfully"
+
+jool_common:
+	@echo "Building jool_common module..."
+	$(MAKE) -C $(KERNEL_DIR) M=$(abspath $(JOOL_MOD_COMMON)) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+
+jool_nat64: jool_common
+	@echo "Building jool (NAT64) module..."
+	$(MAKE) -C $(KERNEL_DIR) M=$(abspath $(JOOL_MOD_NAT64)) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+
+jool_siit: jool_common
+	@echo "Building jool_siit module..."
+	$(MAKE) -C $(KERNEL_DIR) M=$(abspath $(JOOL_MOD_SIIT)) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+
+install:
+	@mkdir -p $(OUT_DIR)
+	@cp $(JOOL_MOD_COMMON)/jool_common.ko $(OUT_DIR)/
+	@cp $(JOOL_MOD_NAT64)/jool.ko $(OUT_DIR)/
+	@cp $(JOOL_MOD_SIIT)/jool_siit.ko $(OUT_DIR)/
+	@echo "Jool modules installed to $(OUT_DIR)"
+
+strip:
+	@for mod in $(OUT_DIR)/jool*.ko; do \
+		$(CROSS_COMPILE)strip --strip-debug "$$mod"; \
+	done
+	@echo "Jool modules stripped"
+
+clean:
+	$(MAKE) -C $(KERNEL_DIR) M=$(abspath $(JOOL_MOD_COMMON)) ARCH=$(ARCH) clean
+	$(MAKE) -C $(KERNEL_DIR) M=$(abspath $(JOOL_MOD_NAT64)) ARCH=$(ARCH) clean
+	$(MAKE) -C $(KERNEL_DIR) M=$(abspath $(JOOL_MOD_SIIT)) ARCH=$(ARCH) clean
+	@rm -rf $(OUT_DIR)/*.ko
+
+help:
+	@echo "Jool NAT64/SIIT 内核模块构建"
+	@echo ""
+	@echo "使用方法:"
+	@echo "  make -f Makefile.jool all           # 编译所有 Jool 模块"
+	@echo "  make -f Makefile.jool install       # 复制模块到输出目录"
+	@echo "  make -f Makefile.jool strip         # 剥离调试符号"
+	@echo "  make -f Makefile.jool clean         # 清理构建产物"
+	@echo ""
+	@echo "参数说明:"
+	@echo "  JOOL_SRC      Jool 源码目录 (默认: ./jool-src)"
+	@echo "  KERNEL_DIR    内核源码目录 (默认: /lib/modules/.../build)"
+	@echo "  ARCH          目标架构 (默认: arm64)"
+	@echo "  CROSS_COMPILE 交叉编译器前缀 (默认: 空)"
+	@echo "  OUT_DIR       输出目录 (默认: ./kmods)"
+	@echo ""
+	@echo "示例:"
+	@echo "  make -f Makefile.jool all \\"
+	@echo "    KERNEL_DIR=/path/to/linux \\"
+	@echo "    ARCH=armv7 \\"
+	@echo "    CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-"

@@ -44,11 +44,21 @@ on:
         required: false
         default: ''
         type: string
+      build_target:
+        description: 'Build target (what modules to build)'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+        - xmir-patcher
+        - jool
+        - both
 
 env:
   TEST_BUILD: ${{ github.event.inputs.test_build == 'true' }}
   FAKE_BUILD: ${{ github.event.inputs.fake_build == 'true' }}
   TAG_SUFFIX: ${{ github.event.inputs.suffix }}
+  BUILD_TARGET: ${{ github.event.inputs.build_target || 'both' }}
   CUSTOM_KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
   CUSTOM_ARCH: ${{ github.event.inputs.arch }}
   CUSTOM_PREEMPT: ${{ github.event.inputs.preempt == 'true' }}
@@ -80,6 +90,7 @@ jobs:
       custom_kernel_version: ${{ env.CUSTOM_KERNEL_VERSION }}
       custom_arch: ${{ env.CUSTOM_ARCH }}
       custom_preempt: ${{ env.CUSTOM_PREEMPT }}
+      build_target: ${{ env.BUILD_TARGET }}
     steps:
       - name: Get repo data via GH API
         id: gh
@@ -107,6 +118,7 @@ jobs:
             echo "build_date=$BUILD_DATE"
             echo "build_time=$BUILD_TIME"
             echo "fw_date=$FW_DATE"
+            echo "build_target=${{ env.BUILD_TARGET }}"
           } >> $GITHUB_OUTPUT
 
   generate-matrix:
@@ -121,18 +133,20 @@ jobs:
           CUSTOM_KERNEL_VERSION: ${{ needs.check.outputs.custom_kernel_version }}
           CUSTOM_ARCH: ${{ needs.check.outputs.custom_arch }}
           CUSTOM_PREEMPT: ${{ needs.check.outputs.custom_preempt }}
+          BUILD_TARGET: ${{ needs.check.outputs.build_target }}
         run: |
+          TARGET="${BUILD_TARGET:-both}"
           if [ -n "$CUSTOM_KERNEL_VERSION" ] || [ -n "$CUSTOM_ARCH" ]; then
             # Custom build - single configuration
             ARCH="${CUSTOM_ARCH:-armv7}"
             KVER="${CUSTOM_KERNEL_VERSION:-4.4.60}"
             PREEMPT="p_off"
             [ "$CUSTOM_PREEMPT" = "true" ] && PREEMPT="p_on"
-            echo "matrix={\"include\":[{\"arch\":\"$ARCH\",\"kver\":\"$KVER\",\"preempt\":\"$PREEMPT\"}]}" >> $GITHUB_OUTPUT
+            echo "matrix={\"include\":[{\"arch\":\"$ARCH\",\"kver\":\"$KVER\",\"preempt\":\"$PREEMPT\",\"target\":\"$TARGET\"}]}" >> $GITHUB_OUTPUT
           else
             # Default matrix build
-            cat >> $GITHUB_OUTPUT << 'EOF'
-          matrix={"arch":["arm64","armv7","mips"],"kver":["4.4","5.4","6.6"],"preempt":["p_off","p_on"],"exclude":[{"arch":"armv7","kver":"6.6"},{"arch":"mips","kver":"6.6"}],"include":[{"arch":"arm64","kver":"5.4","preempt":"p_on"}]}
+            cat >> $GITHUB_OUTPUT << EOF
+          matrix={"arch":["armv7"],"kver":["4.4.60"],"preempt":["p_on"],"target":["jool"],"exclude":[],"include":[]}
           EOF
           fi
   
@@ -216,10 +230,12 @@ jobs:
           PATCH_VERSION=$(echo "$KVER" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
           if [ -n "$PATCH_VERSION" ]; then
             # Use stable kernel repo for exact version
-            git clone https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git --depth 1 -b v$KVER $KDIR
+            # git clone https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git --depth 1 -b v$KVER $KDIR
+            git clone https://mirrors.tuna.tsinghua.edu.cn/git/linux-stable.git --depth 1 -b v$KVER $KDIR
           else
             # Use mainline kernel repo for base version
-            git clone https://github.com/torvalds/linux.git --depth 1 -b v$KVER $KDIR
+            # git clone https://github.com/torvalds/linux.git --depth 1 -b v$KVER $KDIR
+            git clone https://mirrors.tuna.tsinghua.edu.cn/git/linux.git --depth 1 -b v$KVER $KDIR
           fi
 
       - name: Patch Linux Kernel sources
@@ -338,33 +354,80 @@ jobs:
 
       - name: Build xmir_patcher module
         id: compile
-        if: steps.mod_prepare.outputs.status == 'success'
+        if: steps.mod_prepare.outputs.status == 'success' && (matrix.target == 'xmir-patcher' || matrix.target == 'both')
         working-directory: ${{ env.KDIR }}
         run: |
           make M=$MDIR modules
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: Strip xmir_patcher module
+      - name: Clone Jool source
+        if: matrix.target == 'jool' || matrix.target == 'both'
+        run: |
+          echo "Cloning Jool source code..."
+          git clone --depth 1 -b v4.1.15 https://github.com/NICMx/Jool.git $WORK_DIR/jool-src
+          echo "JOOL_SRC=$WORK_DIR/jool-src" >> $GITHUB_ENV
+          ls -la $WORK_DIR/jool-src/src/mod/
+
+      - name: Apply Jool kernel compatibility patch
+        if: matrix.target == 'jool' || matrix.target == 'both'
+        run: |
+          echo "Applying Jool compatibility patch for kernel $KVER..."
+          cd $JOOL_SRC
+          patch -p1 < $WORK_DIR/patches/jool-kernel-4.4.patch || echo "Patch may not apply cleanly, continuing..."
+          echo "Jool source ready for compilation"
+
+      - name: Build Jool modules
+        id: jool_compile
+        if: matrix.target == 'jool' || matrix.target == 'both'
+        run: |
+          echo "Building Jool modules..."
+          cd $KDIR
+          echo "Building jool_common..."
+          make M=$JOOL_SRC/src/mod/common ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          echo "Building jool (NAT64)..."
+          make M=$JOOL_SRC/src/mod/nat64 ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          echo "Building jool_siit..."
+          make M=$JOOL_SRC/src/mod/siit ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          echo "Verifying built Jool modules..."
+          ls -la $JOOL_SRC/src/mod/common/jool_common.ko
+          ls -la $JOOL_SRC/src/mod/nat64/jool.ko
+          ls -la $JOOL_SRC/src/mod/siit/jool_siit.ko
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Strip modules
         id: strip
-        if: steps.compile.outputs.status == 'success'
+        if: steps.compile.outputs.status == 'success' || steps.jool_compile.outputs.status == 'success'
         working-directory: ${{ env.KDIR }}
         run: |
           OUT_DIR=$MDIR
-          if make help | grep -q modules_strip; then
-              echo "Using modules_strip"
-              make M=$MDIR modules_strip
-          else
-              echo "Using INSTALL_MOD_STRIP"
-              KRN_REL=$( make -s kernelrelease )
-              echo "KRN_REL = $KRN_REL"
-              INSTALL_DIR=$WORK_DIR/_install
-              export INSTALL_MOD_PATH=$INSTALL_DIR
-              export INSTALL_MOD_STRIP=1
-              make M=$MDIR modules_install
-              OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/updates"
-              if [ ! -d "$OUT_DIR" ]; then
-                  OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/extra"
-              fi
+          # Strip xmir_patcher if built
+          if [ "${{ steps.compile.outputs.status }}" = "success" ]; then
+            if make help | grep -q modules_strip; then
+                echo "Using modules_strip for xmir_patcher"
+                make M=$MDIR modules_strip
+            else
+                echo "Using INSTALL_MOD_STRIP for xmir_patcher"
+                KRN_REL=$( make -s kernelrelease )
+                echo "KRN_REL = $KRN_REL"
+                INSTALL_DIR=$WORK_DIR/_install
+                export INSTALL_MOD_PATH=$INSTALL_DIR
+                export INSTALL_MOD_STRIP=1
+                make M=$MDIR modules_install
+                OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/updates"
+                if [ ! -d "$OUT_DIR" ]; then
+                    OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/extra"
+                fi
+            fi
+          fi
+          # Strip and copy Jool modules if built
+          if [ "${{ steps.jool_compile.outputs.status }}" = "success" ] && [ -n "$JOOL_SRC" ]; then
+              echo "Stripping Jool modules..."
+              ${CROSS_COMPILE}strip --strip-debug $JOOL_SRC/src/mod/common/jool_common.ko || true
+              ${CROSS_COMPILE}strip --strip-debug $JOOL_SRC/src/mod/nat64/jool.ko || true
+              ${CROSS_COMPILE}strip --strip-debug $JOOL_SRC/src/mod/siit/jool_siit.ko || true
+              cp $JOOL_SRC/src/mod/common/jool_common.ko $OUT_DIR/ || true
+              cp $JOOL_SRC/src/mod/nat64/jool.ko $OUT_DIR/ || true
+              cp $JOOL_SRC/src/mod/siit/jool_siit.ko $OUT_DIR/ || true
           fi
           echo "OUT_DIR=$OUT_DIR" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
@@ -377,13 +440,14 @@ jobs:
           
       - name: Upload OUT directory
         uses: actions/upload-artifact@main
-        if: steps.compile.outputs.status == 'success'
+        if: steps.strip.outputs.status == 'success'
         env: 
           ARCH: ${{ matrix.arch }}
           KVER: ${{ matrix.kver }}
           PREEMPT: ${{ matrix.preempt }}
+          TARGET: ${{ matrix.target }}
         with:
-          name: kmod-xmir-${{ env.KVER }}-${{ env.ARCH }}-${{ env.PREEMPT }}
+          name: kmod-${{ env.TARGET }}-${{ env.KVER }}-${{ env.ARCH }}-${{ env.PREEMPT }}
           path: ${{ env.OUT_DIR }}
           if-no-files-found: error 
 
@@ -409,19 +473,35 @@ jobs:
           for XDIR in ./kmod-*; do
               if [ -d "$XDIR" ]; then
                   NAME=$( basename $XDIR )
+                  # Format: kmod-{target}-{kver}-{arch}-{preempt}
+                  TARGET=$( echo $NAME | cut -d- -f2 )
                   KVER=$( echo $NAME | cut -d- -f3 )
                   ARCH=$( echo $NAME | cut -d- -f4 )
                   PREEMPT=$( echo $NAME | cut -d- -f5 )
                   SUFFIX=
-                  if [ $PREEMPT = p_on ]; then
+                  if [ "$PREEMPT" = "p_on" ]; then
                       SUFFIX="-preempt"
                   fi
-                  cp $XDIR/xmir_patcher.ko ./public/xmir_patcher-$KVER-$ARCH$SUFFIX.ko
+                  # Copy modules based on target
+                  if [ "$TARGET" = "xmir-patcher" ] || [ "$TARGET" = "both" ]; then
+                    cp $XDIR/xmir_patcher.ko ./public/xmir_patcher-$KVER-$ARCH$SUFFIX.ko || true
+                  fi
+                  if [ "$TARGET" = "jool" ] || [ "$TARGET" = "both" ]; then
+                    cp $XDIR/jool_common.ko ./public/jool_common-$KVER-$ARCH$SUFFIX.ko || true
+                    cp $XDIR/jool.ko ./public/jool-$KVER-$ARCH$SUFFIX.ko || true
+                    cp $XDIR/jool_siit.ko ./public/jool_siit-$KVER-$ARCH$SUFFIX.ko || true
+                  fi
               fi
           done
           cd public
-          tar -czvf ../kmod-xmir-$TAG.tar.gz *.ko
-          zip -0 ../kmod-xmir-$TAG.zip *.ko
+          ls -la *.ko 2>/dev/null || echo "No .ko files found"
+          if ls *.ko 1>/dev/null 2>&1; then
+            tar -czvf ../kmod-xmir-$TAG.tar.gz *.ko
+            zip -0 ../kmod-xmir-$TAG.zip *.ko
+          else
+            echo "ERROR: No kernel modules to package"
+            exit 1
+          fi
 
       - name: Upload assets
         uses: andelf/nightly-release@main

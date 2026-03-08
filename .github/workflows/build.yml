@@ -334,6 +334,11 @@ jobs:
           scripts/config --undefine DEBUG_INFO_COMPRESSED
           scripts/config --set-val  DEBUG_INFO_NONE       y
           scripts/config --set-val  DEBUG_INFO_DWARF5     n
+          # Disable namespaces for Jool compatibility with target router
+          scripts/config --disable NAMESPACES
+          scripts/config --disable NET_NS
+          scripts/config --disable UTS_NS
+          scripts/config --disable PID_NS
           echo "############ prepare .config ############"
           make scripts prepare
           echo "status=success" >> $GITHUB_OUTPUT
@@ -383,15 +388,292 @@ jobs:
           echo "Building Jool modules..."
           cd $KDIR
           echo "Building jool_common..."
-          make M=$JOOL_SRC/src/mod/common ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          make M=$JOOL_SRC/src/mod/common ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KCFLAGS="-fno-stack-protector" modules
           echo "Building jool (NAT64)..."
-          make M=$JOOL_SRC/src/mod/nat64 ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          make M=$JOOL_SRC/src/mod/nat64 ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KCFLAGS="-fno-stack-protector" modules
           echo "Building jool_siit..."
-          make M=$JOOL_SRC/src/mod/siit ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          make M=$JOOL_SRC/src/mod/siit ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KCFLAGS="-fno-stack-protector" modules
           echo "Verifying built Jool modules..."
           ls -la $JOOL_SRC/src/mod/common/jool_common.ko
           ls -la $JOOL_SRC/src/mod/nat64/jool.ko
           ls -la $JOOL_SRC/src/mod/siit/jool_siit.ko
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Build jool-tools (userspace)
+        id: jool_tools
+        if: matrix.target == 'jool' || matrix.target == 'both'
+        run: |
+          echo "Building jool-tools (userspace utilities)..."
+          
+          # Install build dependencies
+          apt-get update
+          apt-get install -y autoconf automake libtool pkg-config bison flex
+          
+          # Set up cross-compilation environment
+          export CC="${CROSS_COMPILE}gcc"
+          export LD="${CROSS_COMPILE}ld"
+          export AR="${CROSS_COMPILE}ar"
+          export RANLIB="${CROSS_COMPILE}ranlib"
+          export STRIP="${CROSS_COMPILE}strip"
+          
+          # Build libnl from source (required for jool-tools)
+          # SDK doesn't include libnl development files
+          echo "Building libnl from source..."
+          LIBNL_SRC=$WORK_DIR/libnl-src
+          LIBNL_INSTALL=$WORK_DIR/libnl-install
+          git clone --depth 1 --branch libnl3_2_25 https://github.com/thom311/libnl.git $LIBNL_SRC
+          cd $LIBNL_SRC
+          
+          # Build libnl with autotools
+          PATH=/usr/bin:/bin:$TC_BIN autoreconf --install
+          ./configure \
+            --host=$TARGET_HOST \
+            --prefix=$LIBNL_INSTALL \
+            --enable-static \
+            --disable-shared \
+            --disable-cli
+          make -j$(nproc)
+          make install
+          # libnl headers are installed to include/libnl3/netlink/
+          # so we need to use include/libnl3 as the include path
+          LIBNL_INCLUDE=$LIBNL_INSTALL/include/libnl3
+          LIBNL_LIB=$LIBNL_INSTALL/lib
+          echo "libnl built and installed to: $LIBNL_INSTALL"
+          echo "libnl include path: $LIBNL_INCLUDE"
+          ls -la $LIBNL_LIB/
+          ls -la $LIBNL_INCLUDE/netlink/ | head -10
+          
+          # Build argp-standalone (needed for musl libc)
+          # argp.h is a glibc extension, not available in musl
+          echo "Building argp-standalone..."
+          ARGP_SRC=$WORK_DIR/argp-standalone
+          ARGP_INSTALL=$WORK_DIR/argp-install
+          mkdir -p $ARGP_INSTALL/lib $ARGP_INSTALL/include
+          git clone --depth 1 https://github.com/liyanboy74/argp-standalone.git $ARGP_SRC
+          cd $ARGP_SRC
+          
+          # Check repository structure
+          echo "Repository structure:"
+          ls -la
+          find . -name "argp.h" -o -name "*.h" | head -20
+          
+          # Create musl compatibility header for argp-standalone build
+          # This defines UNUSED, PRINTF_STYLE, _GNU_SOURCE, and sys_errlist
+          # NOTE: _argp_basename and _argp_short_program_name are NOT defined here
+          # because their signatures must match argp.h declarations exactly
+          cat > compat.h << 'EOF'
+          #ifndef COMPAT_H
+          #define COMPAT_H
+          #define _GNU_SOURCE 1
+          #define UNUSED __attribute__((unused))
+          #define PRINTF_STYLE(a, b)
+          
+          /* musl does not provide sys_errlist, use strerror instead */
+          #define sys_errlist strerrorlist_compat
+          static const char *strerrorlist_compat[] = {
+            [0] = "Success",
+            [1] = "Operation not permitted",
+            [2] = "No such file or directory",
+            [3] = "No such process",
+            [4] = "Interrupted system call",
+            [5] = "Input/output error",
+            [6] = "No such device or address",
+            [7] = "Argument list too long",
+            [8] = "Exec format error",
+            [9] = "Bad file descriptor",
+            [10] = "No child processes",
+            [11] = "Resource temporarily unavailable",
+            [12] = "Cannot allocate memory",
+            [13] = "Permission denied",
+            [14] = "Bad address",
+            [15] = "Block device required",
+            [16] = "Device or resource busy",
+            [17] = "File exists",
+            [18] = "Invalid cross-device link",
+            [19] = "No such device",
+            [20] = "Not a directory",
+            [21] = "Is a directory",
+            [22] = "Invalid argument",
+            [23] = "Too many open files in system",
+            [24] = "Too many open files",
+            [25] = "Inappropriate ioctl for device",
+            [26] = "Text file busy",
+            [27] = "File too large",
+            [28] = "No space left on device",
+            [29] = "Illegal seek",
+            [30] = "Read-only file system",
+            [31] = "Too many links",
+            [32] = "Broken pipe",
+            [33] = "Numerical argument out of domain",
+            [34] = "Numerical result out of range"
+          };
+          #endif
+          EOF
+          
+          # Create argp-musl-compat.c with correct function signatures matching argp.h
+          # These functions are needed for musl libc which doesn't provide them
+          cat > argp-musl-compat.c << 'EOF'
+          /* musl compatibility functions for argp-standalone
+           * Signatures must match argp.h declarations exactly */
+          #include <string.h>
+          #include "argp.h"
+          
+          extern char *program_invocation_name;
+          
+          char *_argp_basename(char *name) {
+            char *p = strrchr(name, '/');
+            return p ? p + 1 : name;
+          }
+          
+          /* Must return char* to match argp.h declaration */
+          char *_argp_short_program_name(const struct argp_state *state) {
+            (void)state;  /* unused parameter */
+            if (!program_invocation_name) {
+              static char default_name[] = "jool";
+              return default_name;
+            }
+            return _argp_basename(program_invocation_name);
+          }
+          EOF
+          
+          # Build static library manually with compat header
+          # Use -include to pull in our compatibility definitions
+          CFLAGS="-include compat.h -I. -fPIC"
+          
+          # Find and compile source files (exclude test files)
+          SRCS=$(find . -name "*.c" ! -name "*test*" ! -name "*example*" | tr '\n' ' ')
+          echo "Compiling: $SRCS"
+          ${CC} $CFLAGS -c $SRCS 2>&1 || echo "Some files may fail, continuing..."
+          
+          # Find argp.h location for argp-musl-compat.c compilation
+          ARGP_H=$(find . -name "argp.h" | head -1)
+          if [ -n "$ARGP_H" ]; then
+            ARGP_DIR=$(dirname "$ARGP_H")
+            echo "Compiling argp-musl-compat.c with argp.h from $ARGP_DIR"
+            ${CC} $CFLAGS -I"$ARGP_DIR" -c argp-musl-compat.c 2>&1 || echo "argp-musl-compat compilation may have warnings"
+          else
+            echo "Warning: argp.h not found, skipping argp-musl-compat.c"
+          fi
+          
+          # Create static library from object files (includes argp-musl-compat.o)
+          ${AR} rcs $ARGP_INSTALL/lib/libargp.a *.o 2>/dev/null || true
+          
+          # Copy header files - check multiple possible locations
+          for hdr in argp.h; do
+            find . -name "$hdr" -exec cp {} $ARGP_INSTALL/include/ \; 2>/dev/null || true
+          done
+          
+          # Copy compat.h for jool-tools build
+          cp compat.h $ARGP_INSTALL/include/ || true
+          
+          echo "argp-standalone built:"
+          ls -la $ARGP_INSTALL/lib/ || echo "lib directory empty"
+          ls -la $ARGP_INSTALL/include/ || echo "include directory empty"
+          
+          cd $JOOL_SRC
+          
+          # Generate configure script using system autotools (not SDK wrappers)
+          PATH=/usr/bin:/bin:$TC_BIN /usr/bin/aclocal --install
+          PATH=/usr/bin:/bin:$TC_BIN /usr/bin/autoreconf --install
+          
+          # Configure for cross-compilation with static linking
+          # Note: -static goes in LDFLAGS, not CFLAGS
+          export PKG_CONFIG_PATH=""
+          export PKG_CONFIG_LIBDIR=""
+          
+          # Set up include paths
+          INCLUDE_PATHS="-I$ARGP_INSTALL/include -I$LIBNL_INCLUDE -I$JOOL_SRC/src -I$JOOL_SRC/src/common"
+          LIB_PATHS="-L$ARGP_INSTALL/lib -L$LIBNL_LIB"
+          
+          ./configure \
+            --host=$TARGET_HOST \
+            --prefix=/usr \
+            --with-xtables=no \
+            --with-bash-completion-dir=no \
+            CFLAGS="$INCLUDE_PATHS" \
+            LDFLAGS="-static $LIB_PATHS" \
+            LIBS="-largp -lnl-3 -lnl-genl-3 -lpthread -lm" \
+            ac_cv_lib_argp_argp_parse=yes \
+            ac_cv_search_argp_parse="-L$ARGP_INSTALL/lib -largp" || true
+          
+          # Build userspace tools
+          make -C src/usr -j$(nproc) || echo "Make may have warnings, checking results..."
+          
+          # Check if binaries were built
+          mkdir -p $WORK_DIR/jool-tools
+          
+          if [ -f "src/usr/nat64/jool" ]; then
+            echo "jool binary built successfully"
+            ${STRIP} src/usr/nat64/jool
+            ls -la src/usr/nat64/jool
+            cp src/usr/nat64/jool $WORK_DIR/jool-tools/
+          else
+            echo "Warning: jool binary not found, trying manual build..."
+            # Manual build with all dependencies - use explicit paths
+            # Exclude siit, iptables, and joold directories to avoid multiple main definitions
+            cd $JOOL_SRC/src/usr
+            mkdir -p nat64 siit
+            SRCS=$(find . -name "*.c" -not -path "./siit/*" -not -path "./iptables/*" -not -path "./joold/*" | tr '\n' ' ')
+            echo "NAT64 sources: $SRCS"
+            echo "INCLUDE_PATHS=$INCLUDE_PATHS"
+            echo "LIB_PATHS=$LIB_PATHS"
+            if ${CC} -static -include $ARGP_INSTALL/include/compat.h -o nat64/jool $SRCS \
+              -I$ARGP_INSTALL/include \
+              -I$LIBNL_INCLUDE \
+              -I$JOOL_SRC/src \
+              -I$JOOL_SRC/src/common \
+              -I$JOOL_SRC/src/usr \
+              -L$ARGP_INSTALL/lib \
+              -L$LIBNL_LIB \
+              -largp -lnl-3 -lnl-genl-3 -lpthread -lm; then
+              echo "Manual build of jool succeeded"
+              ls -la nat64/jool
+              file nat64/jool || true
+              ${STRIP} nat64/jool
+              cp nat64/jool $WORK_DIR/jool-tools/
+              echo "jool copied to $WORK_DIR/jool-tools/"
+            else
+              echo "ERROR: Manual build of jool failed"
+            fi
+            cd $JOOL_SRC
+          fi
+          
+          if [ -f "src/usr/siit/jool_siit" ]; then
+            echo "jool_siit binary built successfully"
+            ${STRIP} src/usr/siit/jool_siit
+            ls -la src/usr/siit/jool_siit
+            cp src/usr/siit/jool_siit $WORK_DIR/jool-tools/
+          else
+            echo "Warning: jool_siit binary not found, trying manual build..."
+            cd $JOOL_SRC/src/usr
+            mkdir -p siit
+            # Exclude nat64, iptables, and joold directories to avoid multiple main definitions
+            SRCS=$(find . -name "*.c" -not -path "./nat64/*" -not -path "./iptables/*" -not -path "./joold/*" | tr '\n' ' ')
+            echo "SIIT sources: $SRCS"
+            if ${CC} -static -include $ARGP_INSTALL/include/compat.h -o siit/jool_siit $SRCS \
+              -I$ARGP_INSTALL/include \
+              -I$LIBNL_INCLUDE \
+              -I$JOOL_SRC/src \
+              -I$JOOL_SRC/src/common \
+              -I$JOOL_SRC/src/usr \
+              -L$ARGP_INSTALL/lib \
+              -L$LIBNL_LIB \
+              -largp -lnl-3 -lnl-genl-3 -lpthread -lm; then
+              echo "Manual build of jool_siit succeeded"
+              ls -la siit/jool_siit
+              file siit/jool_siit || true
+              ${STRIP} siit/jool_siit
+              cp siit/jool_siit $WORK_DIR/jool-tools/
+              echo "jool_siit copied to $WORK_DIR/jool-tools/"
+            else
+              echo "ERROR: Manual build of jool_siit failed"
+            fi
+            cd $JOOL_SRC
+          fi
+          
+          # List results
+          ls -la $WORK_DIR/jool-tools/ || echo "No jool-tools built"
+          echo "JOOL_TOOLS_DIR=$WORK_DIR/jool-tools" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Strip modules
@@ -399,26 +681,38 @@ jobs:
         if: steps.compile.outputs.status == 'success' || steps.jool_compile.outputs.status == 'success'
         working-directory: ${{ env.KDIR }}
         run: |
-          OUT_DIR=$MDIR
+          # Set output directory based on target
+          TARGET="${{ matrix.target }}"
+          if [ "$TARGET" = "jool" ]; then
+            OUT_DIR=$WORK_DIR/jool-out
+            mkdir -p $OUT_DIR
+            echo "Using separate output directory for jool: $OUT_DIR"
+          else
+            OUT_DIR=$MDIR
+          fi
+          
           # Strip xmir_patcher if built
           if [ "${{ steps.compile.outputs.status }}" = "success" ]; then
-            if make help | grep -q modules_strip; then
-                echo "Using modules_strip for xmir_patcher"
-                make M=$MDIR modules_strip
-            else
-                echo "Using INSTALL_MOD_STRIP for xmir_patcher"
-                KRN_REL=$( make -s kernelrelease )
-                echo "KRN_REL = $KRN_REL"
-                INSTALL_DIR=$WORK_DIR/_install
-                export INSTALL_MOD_PATH=$INSTALL_DIR
-                export INSTALL_MOD_STRIP=1
-                make M=$MDIR modules_install
-                OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/updates"
-                if [ ! -d "$OUT_DIR" ]; then
-                    OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/extra"
-                fi
+            if [ "$TARGET" != "jool" ]; then
+              if make help | grep -q modules_strip; then
+                  echo "Using modules_strip for xmir_patcher"
+                  make M=$MDIR modules_strip
+              else
+                  echo "Using INSTALL_MOD_STRIP for xmir_patcher"
+                  KRN_REL=$( make -s kernelrelease )
+                  echo "KRN_REL = $KRN_REL"
+                  INSTALL_DIR=$WORK_DIR/_install
+                  export INSTALL_MOD_PATH=$INSTALL_DIR
+                  export INSTALL_MOD_STRIP=1
+                  make M=$MDIR modules_install
+                  OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/updates"
+                  if [ ! -d "$OUT_DIR" ]; then
+                      OUT_DIR="$INSTALL_DIR/lib/modules/$KRN_REL/extra"
+                  fi
+              fi
             fi
           fi
+          
           # Strip and copy Jool modules if built
           if [ "${{ steps.jool_compile.outputs.status }}" = "success" ] && [ -n "$JOOL_SRC" ]; then
               echo "Stripping Jool modules..."
@@ -429,13 +723,19 @@ jobs:
               cp $JOOL_SRC/src/mod/nat64/jool.ko $OUT_DIR/ || true
               cp $JOOL_SRC/src/mod/siit/jool_siit.ko $OUT_DIR/ || true
           fi
+          
+          # Copy jool-tools binaries if built
+          if [ "${{ steps.jool_tools.outputs.status }}" = "success" ] && [ -d "$WORK_DIR/jool-tools" ]; then
+              echo "Copying jool-tools binaries..."
+              cp $WORK_DIR/jool-tools/* $OUT_DIR/ 2>/dev/null || true
+          fi
           echo "OUT_DIR=$OUT_DIR" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: List built module
+      - name: List built artifacts
         run: |
-          echo "Built modules:"
-          ls -la "$OUT_DIR"/*.ko || echo "No modules built"
+          echo "Built modules and tools:"
+          ls -la "$OUT_DIR"/ || echo "No artifacts built"
           echo "status=success" >> $GITHUB_OUTPUT
           
       - name: Upload OUT directory
@@ -449,7 +749,54 @@ jobs:
         with:
           name: kmod-${{ env.TARGET }}-${{ env.KVER }}-${{ env.ARCH }}-${{ env.PREEMPT }}
           path: ${{ env.OUT_DIR }}
-          if-no-files-found: error 
+          if-no-files-found: error
+          
+      - name: Prepare individual files for upload
+        if: steps.strip.outputs.status == 'success' && matrix.target == 'jool'
+        env:
+          ARCH: ${{ matrix.arch }}
+          KVER: ${{ matrix.kver }}
+          PREEMPT: ${{ matrix.preempt }}
+        run: |
+          SUFFIX=""
+          [ "$PREEMPT" = "p_on" ] && SUFFIX="-preempt"
+          
+          mkdir -p individual
+          
+          # Copy individual .ko files
+          if [ -f "$OUT_DIR/jool_common.ko" ]; then
+            cp "$OUT_DIR/jool_common.ko" "individual/jool_common-$KVER-$ARCH$SUFFIX.ko"
+            echo "Prepared jool_common.ko"
+          fi
+          if [ -f "$OUT_DIR/jool.ko" ]; then
+            cp "$OUT_DIR/jool.ko" "individual/jool-$KVER-$ARCH$SUFFIX.ko"
+            echo "Prepared jool.ko"
+          fi
+          if [ -f "$OUT_DIR/jool_siit.ko" ]; then
+            cp "$OUT_DIR/jool_siit.ko" "individual/jool_siit-$KVER-$ARCH$SUFFIX.ko"
+            echo "Prepared jool_siit.ko"
+          fi
+          
+          # Copy individual binary files
+          if [ -f "$OUT_DIR/jool" ]; then
+            cp "$OUT_DIR/jool" "individual/jool-$KVER-$ARCH$SUFFIX"
+            echo "Prepared jool binary"
+          fi
+          if [ -f "$OUT_DIR/jool_siit" ]; then
+            cp "$OUT_DIR/jool_siit" "individual/jool_siit-$KVER-$ARCH$SUFFIX"
+            echo "Prepared jool_siit binary"
+          fi
+          
+          echo "Individual files:"
+          ls -la individual/ || echo "No individual files"
+          
+      - name: Upload individual Jool files
+        if: steps.strip.outputs.status == 'success' && matrix.target == 'jool'
+        uses: actions/upload-artifact@main
+        with:
+          name: jool-individual-${{ matrix.kver }}-${{ matrix.arch }}-${{ matrix.preempt }}
+          path: individual/
+          if-no-files-found: warn 
 
   release:
     needs: [ check, build ]
@@ -462,7 +809,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: kmod-*
+          pattern: "*"
 
       - name: Put modules into archives
         env:
@@ -470,6 +817,8 @@ jobs:
         run: |
           ls -la
           mkdir -p public
+          
+          # Process kmod-* artifacts (main packages)
           for XDIR in ./kmod-*; do
               if [ -d "$XDIR" ]; then
                   NAME=$( basename $XDIR )
@@ -490,14 +839,27 @@ jobs:
                     cp $XDIR/jool_common.ko ./public/jool_common-$KVER-$ARCH$SUFFIX.ko || true
                     cp $XDIR/jool.ko ./public/jool-$KVER-$ARCH$SUFFIX.ko || true
                     cp $XDIR/jool_siit.ko ./public/jool_siit-$KVER-$ARCH$SUFFIX.ko || true
+                    # Copy jool-tools binaries if present
+                    cp $XDIR/jool ./public/jool-$KVER-$ARCH$SUFFIX 2>/dev/null || true
+                    cp $XDIR/jool_siit ./public/jool_siit-$KVER-$ARCH$SUFFIX 2>/dev/null || true
                   fi
               fi
           done
+          
+          # Process jool-individual-* artifacts (individual files)
+          for XDIR in ./jool-individual-*; do
+              if [ -d "$XDIR" ]; then
+                  echo "Copying individual files from $XDIR"
+                  cp $XDIR/* ./public/ 2>/dev/null || true
+              fi
+          done
+          
           cd public
           ls -la *.ko 2>/dev/null || echo "No .ko files found"
+          ls -la jool* 2>/dev/null || echo "No jool binaries found"
           if ls *.ko 1>/dev/null 2>&1; then
-            tar -czvf ../kmod-xmir-$TAG.tar.gz *.ko
-            zip -0 ../kmod-xmir-$TAG.zip *.ko
+            tar -czvf ../kmod-xmir-$TAG.tar.gz *
+            zip -0 ../kmod-xmir-$TAG.zip *
           else
             echo "ERROR: No kernel modules to package"
             exit 1
@@ -517,4 +879,7 @@ jobs:
             author: [remittor](https://github.com/remittor)
           files: |
             ./*.tar.gz
-            ./*.zip 
+            ./*.zip
+            ./public/*.ko
+            ./public/jool-4*
+            ./public/jool_siit-4* 

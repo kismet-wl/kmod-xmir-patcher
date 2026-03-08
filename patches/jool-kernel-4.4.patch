@@ -1,5 +1,60 @@
+diff --git a/src/mod/common/atomic_config.c b/src/mod/common/atomic_config.c
+index 705f66f..43214e0 100644
+--- a/src/mod/common/atomic_config.c
++++ b/src/mod/common/atomic_config.c
+@@ -1,6 +1,7 @@
+ #include "mod/common/atomic_config.h"
+ 
+ #include <linux/kref.h>
++#include "mod/common/jool_netns.h"
+ #include <linux/timer.h>
+ #include "mod/common/log.h"
+ #include "mod/common/wkmalloc.h"
+@@ -111,7 +112,7 @@ static int get_candidate(char *iname, struct config_candidate **result)
+ 	struct config_candidate *candidate;
+ 	struct config_candidate *tmp;
+ 
+-	ns = get_net_ns_by_pid(task_pid_vnr(current));
++	ns = jool_get_net_ns();
+ 	if (IS_ERR(ns)) {
+ 		log_err("Could not retrieve the current namespace.");
+ 		return PTR_ERR(ns);
+@@ -122,13 +123,14 @@ static int get_candidate(char *iname, struct config_candidate **result)
+ 				&& (strcmp(candidate->xlator.iname, iname) == 0)
+ 				&& (candidate->pid == task_pid_nr(current))) {
+ 			*result = candidate;
+-			put_net(ns);
++			jool_put_net(ns);
+ 			return 0;
+ 		}
+ 
+ 		candidate_expire_maybe(candidate);
+ 	}
+ 
++	jool_put_net(ns);
+ 	log_err("Instance not found.");
+ 	return -ESRCH;
+ }
+@@ -142,7 +144,7 @@ static int handle_init(struct config_candidate **out, struct nlattr *attr,
+ 
+ 	LOG_DEBUG("Handling atomic INIT attribute.");
+ 
+-	ns = get_net_ns_by_pid(task_pid_vnr(current));
++	ns = jool_get_net_ns();
+ 	if (IS_ERR(ns)) {
+ 		log_err("Could not retrieve the current namespace.");
+ 		return PTR_ERR(ns);
+@@ -166,7 +168,7 @@ static int handle_init(struct config_candidate **out, struct nlattr *attr,
+ 	*out = candidate;
+ 	/* Fall through */
+ 
+-end:	put_net(ns);
++end:	jool_put_net(ns);
+ 	return error;
+ }
+ 
 diff --git a/src/mod/common/db/bib/db.c b/src/mod/common/db/bib/db.c
-index e24dfa6c..7ad90d8e 100644
+index e24dfa6..7ad90d8 100644
 --- a/src/mod/common/db/bib/db.c
 +++ b/src/mod/common/db/bib/db.c
 @@ -476,7 +476,7 @@ static void log_bib(struct xlator *jool, struct tabled_bib *bib, char *action)
@@ -20,8 +75,187 @@ index e24dfa6c..7ad90d8e 100644
  	log_info("%s %ld/%d/%d %d:%d:%d (GMT) - %s " TA6PP "|" TA6PP "|"
  			TA4PP "|" TA4PP "|%s", jool->iname,
  			1900 + time.tm_year, time.tm_mon + 1, time.tm_mday,
+diff --git a/src/mod/common/db/pool4/rfc6056.c b/src/mod/common/db/pool4/rfc6056.c
+index e7766a7..36a3dcc 100644
+--- a/src/mod/common/db/pool4/rfc6056.c
++++ b/src/mod/common/db/pool4/rfc6056.c
+@@ -1,7 +1,6 @@
+ #include "mod/common/db/pool4/rfc6056.h"
+ 
+-#include <crypto/hash.h>
+-#include "mod/common/linux_version.h"
++#include <linux/jhash.h>
+ #include "mod/common/log.h"
+ #include "mod/common/wkmalloc.h"
+ 
+@@ -69,21 +68,8 @@
+ static unsigned char *secret_key;
+ static size_t secret_key_len;
+ 
+-/*
+- * It looks like this does not require a spinlock either:
+- *
+- * "The shash interface (...)
+- * improves over hash in two ways.  Firstly shash is reentrant,
+- * meaning that the same tfm may be used by two threads simultaneously
+- * as all hashing state is stored in a local descriptor."
+- * (Linux commit 7b5a080b3c46f0cac71c0d0262634c6517d4ee4f)
+- */
+-static struct crypto_shash *shash;
+-
+ int rfc6056_setup(void)
+ {
+-	int error;
+-
+ 	/* Secret key stuff */
+ 	secret_key_len = (PAGE_SIZE < 128) ? PAGE_SIZE : 128;
+ 	secret_key = __wkmalloc("Secret key", secret_key_len, GFP_KERNEL);
+@@ -91,108 +77,61 @@ int rfc6056_setup(void)
+ 		return -ENOMEM;
+ 	get_random_bytes(secret_key, secret_key_len);
+ 
+-	/* TFC stuff */
+-	shash = crypto_alloc_shash("md5", 0, CRYPTO_ALG_ASYNC);
+-	if (IS_ERR(shash)) {
+-		error = PTR_ERR(shash);
+-		log_warn_once("Failed to load transform for MD5; errcode %d",
+-				error);
+-		__wkfree("Secret key", secret_key);
+-		return error;
+-	}
+-
+ 	return 0;
+ }
+ 
+ void rfc6056_teardown(void)
+ {
+-	crypto_free_shash(shash);
+ 	__wkfree("Secret key", secret_key);
+ }
+ 
+-static int hash_tuple(struct shash_desc *desc, __u8 fields,
+-		const struct tuple *tuple6)
+-{
+-	int error;
+-
+-	if (fields & F_ARGS_SRC_ADDR) {
+-		error = crypto_shash_update(desc, (u8 *)&tuple6->src.addr6.l3,
+-				sizeof(tuple6->src.addr6.l3));
+-		if (error)
+-			return error;
+-	}
+-	if (fields & F_ARGS_SRC_PORT) {
+-		error = crypto_shash_update(desc, (u8 *)&tuple6->src.addr6.l4,
+-				sizeof(tuple6->src.addr6.l4));
+-		if (error)
+-			return error;
+-	}
+-	if (fields & F_ARGS_DST_ADDR) {
+-		error = crypto_shash_update(desc, (u8 *)&tuple6->dst.addr6.l3,
+-				sizeof(tuple6->dst.addr6.l3));
+-		if (error)
+-			return error;
+-	}
+-	if (fields & F_ARGS_DST_PORT) {
+-		error = crypto_shash_update(desc, (u8 *)&tuple6->dst.addr6.l4,
+-				sizeof(tuple6->dst.addr6.l4));
+-		if (error)
+-			return error;
+-	}
+-
+-	return crypto_shash_update(desc, secret_key, secret_key_len);
+-}
+-
+ /**
+  * RFC 6056, Algorithm 3. Returns a hash out of some of @tuple's fields.
+  *
+  * Just to clarify: Because our port pool is a somewhat complex data structure
+  * (rather than a simple range), ephemerals are now handled by pool4. This
+  * function has been stripped now to only consist of F(). (Hence the name.)
++ *
++ * Uses jhash (Jenkins hash) instead of MD5 for better kernel compatibility.
+  */
+ int rfc6056_f(struct xlation *state, unsigned int *result)
+ {
+-	union {
+-		__be32 as32[4];
+-		__u8 as8[16];
+-	} md5_result;
+-	struct shash_desc *desc;
+-	int error = 0;
++	u32 hash_init = 0;
++	u32 hash_array[12]; /* Max: 4 words (src addr) + 1 (src port) + 4 (dst addr) + 1 (dst port) + secret_key */
++	int idx = 0;
++	__u8 fields;
+ 
+-	desc = __wkmalloc("shash desc", sizeof(struct shash_desc)
+-			+ crypto_shash_descsize(shash), GFP_ATOMIC);
+-	if (!desc)
+-		return -ENOMEM;
+-
+-	desc->tfm = shash;
+-/* Linux commit: 877b5691f27a1aec0d9b53095a323e45c30069e2 */
+-#if LINUX_VERSION_LOWER_THAN(5, 2, 0, 9, 0)
+-	desc->flags = 0;
+-#endif
++	fields = state->jool.globals.nat64.f_args;
+ 
+-	error = crypto_shash_init(desc);
+-	if (error) {
+-		log_debug(state, "crypto_hash_init() error: %d", error);
+-		goto end;
++	/* Build hash input array from tuple fields */
++	if (fields & F_ARGS_SRC_ADDR) {
++		memcpy(&hash_array[idx], &state->in.tuple.src.addr6.l3,
++		       sizeof(state->in.tuple.src.addr6.l3));
++		idx += 4;
+ 	}
+-
+-	error = hash_tuple(desc, state->jool.globals.nat64.f_args,
+-			&state->in.tuple);
+-	if (error) {
+-		log_debug(state, "crypto_hash_update() error: %d", error);
+-		goto end;
++	if (fields & F_ARGS_SRC_PORT) {
++		memcpy(&hash_array[idx], &state->in.tuple.src.addr6.l4,
++		       sizeof(state->in.tuple.src.addr6.l4));
++		idx += 1;
+ 	}
+-
+-	error = crypto_shash_final(desc, md5_result.as8);
+-	if (error) {
+-		log_debug(state, "crypto_hash_digest() error: %d", error);
+-		goto end;
++	if (fields & F_ARGS_DST_ADDR) {
++		memcpy(&hash_array[idx], &state->in.tuple.dst.addr6.l3,
++		       sizeof(state->in.tuple.dst.addr6.l3));
++		idx += 4;
++	}
++	if (fields & F_ARGS_DST_PORT) {
++		memcpy(&hash_array[idx], &state->in.tuple.dst.addr6.l4,
++		       sizeof(state->in.tuple.dst.addr6.l4));
++		idx += 1;
+ 	}
+ 
+-	*result = (__force __u32)md5_result.as32[3];
+-	/* Fall through. */
++	/* Add secret key */
++	memcpy(&hash_array[idx], secret_key, secret_key_len);
++	/* Round up to u32 boundary */
++	idx += (secret_key_len + 3) / 4;
+ 
+-end:
+-	__wkfree("shash desc", desc);
+-	return error;
+-}
++	/* Compute hash using jhash2 (requires u32 aligned data) */
++	*result = jhash2(hash_array, idx, hash_init);
++
++	return 0;
++}
+\ No newline at end of file
 diff --git a/src/mod/common/init.c b/src/mod/common/init.c
-index f3e144b7..e847d65b 100644
+index f3e144b..e847d65 100644
 --- a/src/mod/common/init.c
 +++ b/src/mod/common/init.c
 @@ -146,7 +146,7 @@ bool is_nat64_enabled(void)
@@ -42,20 +276,74 @@ index f3e144b7..e847d65b 100644
  {
  	teardown_common_modules();
  
+diff --git a/src/mod/common/jool_netns.h b/src/mod/common/jool_netns.h
+new file mode 100644
+index 0000000..ffb4ee7
+--- /dev/null
++++ b/src/mod/common/jool_netns.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Jool Network Namespace Compatibility Layer
++ *
++ * Provides compatibility for kernels without CONFIG_NET_NS support.
++ * When CONFIG_NET_NS is disabled, get_net_ns_by_pid() and put_net()
++ * are not exported, so we provide stub implementations.
++ */
++
++#ifndef _JOOL_NETNS_H
++#define _JOOL_NETNS_H
++
++#include <linux/net_namespace.h>
++#include <linux/sched.h>
++
++/*
++ * When CONFIG_NET_NS is disabled:
++ * - There is only one network namespace (init_net)
++ * - get_net_ns_by_pid() is not exported
++ * - put_net() is not exported (no refcounting needed for init_net)
++ */
++#ifdef CONFIG_NET_NS
++
++static inline struct net *jool_get_net_ns(void)
++{
++	return get_net_ns_by_pid(task_pid_vnr(current));
++}
++
++static inline void jool_put_net(struct net *ns)
++{
++	put_net(ns);
++}
++
++#else /* !CONFIG_NET_NS */
++
++static inline struct net *jool_get_net_ns(void)
++{
++	return &init_net;
++}
++
++static inline void jool_put_net(struct net *ns)
++{
++	/* No-op: init_net doesn't need refcounting */
++}
++
++#endif /* CONFIG_NET_NS */
++
++#endif /* _JOOL_NETNS_H */
 diff --git a/src/mod/common/kernel_hook.h b/src/mod/common/kernel_hook.h
-index e2689130..59ac70f1 100644
+index e268913..4107a2e 100644
 --- a/src/mod/common/kernel_hook.h
 +++ b/src/mod/common/kernel_hook.h
-@@ -4,6 +4,7 @@
+@@ -3,6 +3,7 @@
+ 
  #include <linux/netfilter_ipv4.h>
  #include <linux/netfilter_ipv6.h>
- #include "common/config.h"
 +#include <linux/netfilter.h>
+ #include "common/config.h"
  
  #ifndef XTABLES_DISABLED
- #include <linux/netfilter/x_tables.h>
 diff --git a/src/mod/common/kernel_hook_iptables.c b/src/mod/common/kernel_hook_iptables.c
-index ba9d82d8..50d4397f 100644
+index ba9d82d..50d4397 100644
 --- a/src/mod/common/kernel_hook_iptables.c
 +++ b/src/mod/common/kernel_hook_iptables.c
 @@ -63,7 +63,7 @@ EXPORT_SYMBOL_GPL(target_checkentry);
@@ -68,7 +356,7 @@ index ba9d82d8..50d4397f 100644
  
  static unsigned int verdict2iptables(verdict result, bool enable_debug)
 diff --git a/src/mod/common/nl/attribute.c b/src/mod/common/nl/attribute.c
-index a7dd1d02..6fa06003 100644
+index a7dd1d0..4557237 100644
 --- a/src/mod/common/nl/attribute.c
 +++ b/src/mod/common/nl/attribute.c
 @@ -517,7 +517,7 @@ int jnla_get_plateaus(struct nlattr *root, struct mtu_plateaus *out)
@@ -80,24 +368,22 @@ index a7dd1d02..6fa06003 100644
  	if (error)
  		return error;
  
-@@ -853,13 +853,9 @@ int jnla_parse_nested(struct nlattr *tb[], int maxtype,
- 		const struct nlattr *nla, const struct nla_policy *policy,
+@@ -854,11 +854,10 @@ int jnla_parse_nested(struct nlattr *tb[], int maxtype,
  		char const *name)
  {
--	int error;
+ 	int error;
 -	struct netlink_ext_ack extack;
--
+ 
 -	error = nla_parse_nested(tb, maxtype, nla, policy, &extack);
-+	int error = nla_parse_nested(tb, maxtype, nla, policy);
++	error = nla_parse_nested(tb, maxtype, nla, policy);
  	if (error)
 -		log_err("The '%s' attribute is malformed: %s", name, extack._msg);
--
 +		log_err("The '%s' attribute is malformed.", name);
+ 
  	return error;
  }
- 
 diff --git a/src/mod/common/nl/stats.c b/src/mod/common/nl/stats.c
-index 63fe7824..b66d1b26 100644
+index 63fe782..b66d1b2 100644
 --- a/src/mod/common/nl/stats.c
 +++ b/src/mod/common/nl/stats.c
 @@ -41,7 +41,7 @@ int handle_stats_foreach(struct sk_buff *skb, struct genl_info *info)
@@ -110,7 +396,7 @@ index 63fe7824..b66d1b26 100644
  			if (!written)
  				goto revert_response;
 diff --git a/src/mod/common/rfc7915/6to4.c b/src/mod/common/rfc7915/6to4.c
-index fb18db6a..6a57351c 100644
+index fb18db6..6a57351 100644
 --- a/src/mod/common/rfc7915/6to4.c
 +++ b/src/mod/common/rfc7915/6to4.c
 @@ -1,6 +1,7 @@
@@ -122,7 +408,7 @@ index fb18db6a..6a57351c 100644
  #include <net/udp.h>
  #include <net/tcp.h>
 diff --git a/src/mod/common/rfc7915/common.c b/src/mod/common/rfc7915/common.c
-index c32fca32..0e1a6885 100644
+index c32fca3..0e1a688 100644
 --- a/src/mod/common/rfc7915/common.c
 +++ b/src/mod/common/rfc7915/common.c
 @@ -417,6 +417,6 @@ void skb_cleanup_copy(struct sk_buff *skb)
@@ -133,8 +419,118 @@ index c32fca32..0e1a6885 100644
 +	skb->tstamp = ktime_set(0, 0);
  #endif
  }
+diff --git a/src/mod/common/xlator.c b/src/mod/common/xlator.c
+index e0012be..228bb4d 100644
+--- a/src/mod/common/xlator.c
++++ b/src/mod/common/xlator.c
+@@ -10,6 +10,7 @@
+ #include "mod/common/joold.h"
+ #include "mod/common/kernel_hook.h"
+ #include "mod/common/log.h"
++#include "mod/common/jool_netns.h"
+ #include "mod/common/rcu.h"
+ #include "mod/common/compat_32_64.h"
+ #include "mod/common/wkmalloc.h"
+@@ -487,7 +488,7 @@ int xlator_add(xlator_flags flags, char *iname, struct ipv6_prefix *pool6,
+ 	if (error)
+ 		return error;
+ 
+-	ns = get_net_ns_by_pid(task_pid_vnr(current));
++	ns = jool_get_net_ns();
+ 	if (IS_ERR(ns)) {
+ 		log_err("Could not retrieve the current namespace.");
+ 		return PTR_ERR(ns);
+@@ -497,7 +498,7 @@ int xlator_add(xlator_flags flags, char *iname, struct ipv6_prefix *pool6,
+ 
+ 	instance = wkmalloc(struct jool_instance, GFP_KERNEL);
+ 	if (!instance) {
+-		put_net(ns);
++		jool_put_net(ns);
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -506,7 +507,7 @@ int xlator_add(xlator_flags flags, char *iname, struct ipv6_prefix *pool6,
+ 	error = xlator_init(&instance->jool, ns, iname, flags, pool6);
+ 	if (error) {
+ 		wkfree(struct jool_instance, instance);
+-		put_net(ns);
++		jool_put_net(ns);
+ 		return error;
+ 	}
+ 	instance->hash_set = false;
+@@ -529,14 +530,14 @@ int xlator_add(xlator_flags flags, char *iname, struct ipv6_prefix *pool6,
+ 		goto mutex_fail;
+ 
+ 	mutex_unlock(&lock);
+-	put_net(ns);
++	jool_put_net(ns);
+ 	log_info("Created instance '%s'.", iname);
+ 	return 0;
+ 
+ mutex_fail:
+ 	mutex_unlock(&lock);
+ 	destroy_jool_instance(instance, false);
+-	put_net(ns);
++	jool_put_net(ns);
+ 	return error;
+ }
+ 
+@@ -589,7 +590,7 @@ int xlator_rm(xlator_type xt, char *iname)
+ 		return error;
+ 	}
+ 
+-	ns = get_net_ns_by_pid(task_pid_vnr(current));
++	ns = jool_get_net_ns();
+ 	if (IS_ERR(ns)) {
+ 		log_err("Could not retrieve the current namespace.");
+ 		return PTR_ERR(ns);
+@@ -597,7 +598,7 @@ int xlator_rm(xlator_type xt, char *iname)
+ 
+ 	error = __xlator_rm(ns, iname, xt);
+ 
+-	put_net(ns);
++	jool_put_net(ns);
+ 	return error;
+ }
+ 
+@@ -745,7 +746,7 @@ int xlator_flush(xlator_type xt)
+ 		return error;
+ 	}
+ 
+-	ns = get_net_ns_by_pid(task_pid_vnr(current));
++	ns = jool_get_net_ns();
+ 	if (IS_ERR(ns)) {
+ 		log_err("Could not retrieve the current namespace.");
+ 		return PTR_ERR(ns);
+@@ -753,7 +754,7 @@ int xlator_flush(xlator_type xt)
+ 
+ 	jool_xlator_flush_net(ns, xt);
+ 
+-	put_net(ns);
++	jool_put_net(ns);
+ 	return 0;
+ }
+ 
+@@ -820,7 +821,7 @@ int xlator_find_current(const char *iname, xlator_flags flags,
+ 	struct net *ns;
+ 	int error;
+ 
+-	ns = get_net_ns_by_pid(task_pid_vnr(current));
++	ns = jool_get_net_ns();
+ 	if (IS_ERR(ns)) {
+ 		log_err("Could not retrieve the current namespace.");
+ 		return PTR_ERR(ns);
+@@ -828,7 +829,7 @@ int xlator_find_current(const char *iname, xlator_flags flags,
+ 
+ 	error = xlator_find(ns, flags, iname, result);
+ 
+-	put_net(ns);
++	jool_put_net(ns);
+ 	return error;
+ }
+ 
 diff --git a/src/mod/nat64/jool.c b/src/mod/nat64/jool.c
-index 4f7e6d12..528dd8c2 100644
+index 4f7e6d1..528dd8c 100644
 --- a/src/mod/nat64/jool.c
 +++ b/src/mod/nat64/jool.c
 @@ -76,11 +76,11 @@ static struct pernet_operations joolns_ops = {
@@ -162,7 +558,7 @@ index 4f7e6d12..528dd8c2 100644
  	jool_nat64_put();
  #ifndef XTABLES_DISABLED
 diff --git a/src/mod/siit/jool_siit.c b/src/mod/siit/jool_siit.c
-index d5a51b6a..e2e1be77 100644
+index d5a51b6..e2e1be7 100644
 --- a/src/mod/siit/jool_siit.c
 +++ b/src/mod/siit/jool_siit.c
 @@ -53,7 +53,7 @@ static struct pernet_operations joolns_ops = {
